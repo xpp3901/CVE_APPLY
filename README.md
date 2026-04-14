@@ -24,9 +24,7 @@
 | V-J011 | J2eeFast | Shiro 硬编码 RememberMe 密钥 RCE | 严重 |
 | V-P001 | pig 微服务 | @Inner 内部鉴权 Header 绕过 | 严重 |
 | V-M001 | MaxKey IAM | 多处 ${filters}/${orgIdsList} SQLi | 严重 |
-| V-MALL001 | mall 商城 | 未授权管理员注册 + Alipay 匿名 | 严重 |
 | V-D001 | DataEase | SqlVariable transFilter SQL 注入 | 严重 |
-| V-X001 | XXL-JOB | 执行器空 Token 校验绕过 RCE | 严重 |
 | V-YU001 | yudao-cloud | BrokerageUser ORDER BY 注入 | 高 |
 | V-G001 | Guns Roses | 未授权文件预览路径穿越 | 严重 |
 
