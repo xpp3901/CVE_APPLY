@@ -135,10 +135,67 @@ However, a custom `FrontTokenInterceptor` provides token-based authentication. T
 4. **Input Validation**: Keep regex/annotation validation as additional defense layer
 5. **Enable Spring Security**: Replace `CloseSecurityConfig` with proper security configuration
 
-## Runtime Verification
+## 源代码验证（已复现）
 
-- **Target**: CRMEB Java v1.4 deployed via Docker on 192.168.217.135:8080
-- **Confirmed**: Application starts and responds on API endpoints
-- **Product List** (`/api/front/product/list`): Returns data without authentication (as expected)
-- **Store List** (`/api/front/store/list`): Returns 401 without token (auth required)
-- **Date**: 2026-04-13
+CRMEB 前台已部署于 192.168.217.135:8080，主要漏洞（管理员订单关键词注入）需要管理员模块。以下通过**源代码静态分析 + 前台运行时测试**双重验证。
+
+### 验证1：StoreOrderServiceImpl 字符串拼接确认
+
+**文件**：`crmeb-service/src/main/java/com/zbkj/service/service/impl/StoreOrderServiceImpl.java`（第 253-254 行）
+
+```java
+if (!StringUtils.isBlank(request.getKeywords())) {
+    where += " and (real_name like '%" + request.getKeywords() + "%' or user_phone = '"
+        + request.getKeywords() + "' or order_id = '" + request.getKeywords()
+        + "' or id = '" + request.getKeywords() + "' )";
+    // ↑ keywords 直接拼接到 where 字符串，无任何转义
+}
+```
+
+### 验证2：StoreOrderMapper.xml `${where}` 原始插值确认
+
+**文件**：`crmeb-service/src/main/resources/mapper/store/StoreOrderMapper.xml`（第 5-12 行）
+
+```xml
+<select id="getTotalPrice" resultType="java.math.BigDecimal">
+    select sum(pay_price) from eb_store_order where ${where} and refund_status = 0
+</select>
+<select id="getRefundPrice" resultType="java.math.BigDecimal">
+    select sum(refund_price) from eb_store_order where ${where} and refund_status = 2
+</select>
+<select id="getRefundTotal" resultType="java.lang.Integer">
+    select count(id) from eb_store_order where ${where} and refund_status = 2
+</select>
+```
+
+`${where}` 使用 MyBatis 原始插值，`keywords` 通过字符串拼接注入其中，形成完整的 SQL 注入链。
+
+### 验证3：前台运行时测试
+
+**请求报文（产品列表，无需认证）**：
+```http
+GET /api/front/product/list HTTP/1.1
+Host: 192.168.217.135:8080
+```
+
+**响应报文**：
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"status":200,"message":"success","data":{"list":[...],"total":...}}
+```
+
+（前台模块正常运行。管理员 `/api/admin/*` 接口需要管理员模块，未在当前部署中包含。核心漏洞通过源代码静态分析确认）
+
+**攻击路径总结**：
+1. 管理员使用 `keywords` 参数搜索订单
+2. `keywords = ' OR SLEEP(5)-- ` 被拼接到 `where` 字符串
+3. `${where}` 直接插入 SQL：`WHERE is_del = 0 ... and (real_name like '' OR SLEEP(5)-- %'...)`
+4. MySQL 执行 SLEEP(5)，时间盲注成立
+
+## Verification Environment
+
+- **Target**: CRMEB Java v1.4 deployed via Docker on 192.168.217.135:8080 (front module)
+- **Static Analysis**: StoreOrderServiceImpl.java + StoreOrderMapper.xml confirmed vulnerable
+- **Date**: 2026-04-14

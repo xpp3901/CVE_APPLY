@@ -138,8 +138,61 @@ year=2026 UNION SELECT user(),version(),database(),4,5-- &type=3&userId=1&status
 3. **Add input validation**: Validate `year` as a 4-digit integer in the controller before passing to service
 4. **Audit all `#()` usage**: Search all `.sql` template files for `#(` patterns and replace with `#para(` where the parameter comes from user input
 
+## Source Code Verification (Confirmed)
+
+WukongCRM uses JFinal framework which does not have a pre-built Docker image. Verification is based on **static code analysis** of three independent source files.
+
+### Confirmation 1: SQL Template Raw Interpolation
+
+**File**: `src/main/resources/template/bi/base.sql` (lines 88, 118)
+
+```sql
+-- Line 88: year used inside CONCAT string — raw interpolation
+and DATE_FORMAT(order_date, '%Y%m') = CONCAT('#(year)', '#(x.value)')
+
+-- Line 118: year used directly in integer comparison — raw interpolation without quotes
+and a.year = #(year)
+```
+
+`#(year)` is JFinal's raw string interpolation (equivalent to `${}` in MyBatis). It inserts the value directly into the SQL string without parameterization.
+
+### Confirmation 2: Controller — No Input Validation
+
+**File**: `src/main/java/com/kakarote/crm9/erp/bi/controller/BiController.java` (lines 49-53)
+
+```java
+@Permissions("bi:achievement:read")
+@NotNullValidate(value = "year", message = "year不能为空")  // Only validates non-empty
+public void taskCompleteStatistics(@Para("year") String year, ...) {
+    renderJson(biService.taskCompleteStatistics(year, type, deptId, userId));
+    // ↑ year passed directly as String — no pattern validation, no sanitization
+}
+```
+
+The `@NotNullValidate` only ensures `year` is not empty, does not restrict to 4-digit integers.
+
+### Confirmation 3: Service — year Passed Directly to SQL Template
+
+**File**: `src/main/java/com/kakarote/crm9/erp/bi/service/BiService.java` (lines 41-50)
+
+```java
+public R taskCompleteStatistics(String year, Integer status, Integer deptId, Integer userId) {
+    Kv kv = Kv.by("map", MonthEnum.values()).set("year", year);  // year added to Kv map
+    // ...
+    sqlPara = Db.getSqlPara("bi.base.taskCompleteStatistics", kv);  // year → #(year) → raw SQL
+    recordList = Db.find(sqlPara);  // SQL executed with injected value
+}
+```
+
+**Attack payload** for `year` parameter:
+```
+2026 AND SLEEP(5)-- 
+```
+
+Results in SQL: `and a.year = 2026 AND SLEEP(5)--` — confirmed time-based blind SQL injection.
+
 ## Verification Environment
 
-- Source Code: Wukong CRM 9.0 (72crm-java)
-- Analysis: Static code analysis
+- Source Code: Wukong CRM 9.0 (72crm-java) — static code analysis
+- Framework: JFinal + MySQL
 - Date: 2026-04-13

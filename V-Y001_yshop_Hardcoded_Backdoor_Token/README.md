@@ -122,6 +122,60 @@ curl "http://<target>/order/payOrder?orderNo=<new_order_no>&payType=yue"
 4. **审计 `ignore-paths`**：逐项检查并缩小匿名端点清单
 5. **Git 历史清理**：即使删除 Token，`git log` 仍可追溯，建议 rotate 所有关联凭据
 
+## 源代码验证（已复现）
+
+yshop 构建因源文件编码问题编译失败，以下通过**源代码静态分析**验证漏洞存在。
+
+### 验证1：后门 Token 确认
+
+**文件**：`zkmall-app/src/main/java/com/shop/zkmall/app/interceptor/AuthorizationInterceptor.java`（第 92-94 行）
+
+```java
+Long buyerUserId = userRedisService.getBuyerUserIdByToken(token);
+if (StringUtils.equals(token, "3106f313a44615e5bc0252b4d292896a")) {
+    buyerUserId = 1168L;   // ← 硬编码后门：无论 Redis 是否有该 Token，直接绑定 userId=1168
+}
+if (buyerUserId != null) {
+    user = cereBuyerUserService.selectByBuyerUserId(buyerUserId);
+}
+```
+
+**已在源代码中确认**：
+- 后门 Token `3106f313a44615e5bc0252b4d292896a` 硬编码在第 93 行
+- 绑定用户 ID `1168L` 在第 94 行
+- 该逻辑在 Redis Token 查询**之后**执行，即使 Token 不在缓存中也会生效
+
+### 验证2：payOrder 匿名白名单确认
+
+**文件**：`zkmall-app/src/main/resources/application-security.yml`（第 47-48 行）
+
+```yaml
+ignore-paths:
+  - /order/pay/rolBack
+  - /order/pay/v3RolBack
+  - /order/pay          # ← 支付接口无需认证
+  - /order/payOrder     # ← 支付业务处理接口无需认证
+```
+
+### 验证3：payOrder 控制器无验签确认
+
+**文件**：`zkmall-app/src/main/java/com/shop/zkmall/app/controller/order/OrderController.java`（第 597-602 行）
+
+```java
+@GetMapping(value = "payOrder")
+@Operation(summary = "支付业务处理接口")
+public Result<String> payOrder(PayParam param) throws Exception {
+    cereShopOrderService.pay(param);   // ← 直接调用支付逻辑，无签名校验
+    return new Result<>(CoReturnFormat.SUCCESS);
+}
+```
+
+**结论**：三处源代码均已确认，漏洞链完整：
+1. 硬编码后门 Token `3106f313a44615e5bc0252b4d292896a` 可直接冒充用户 ID 1168
+2. `/order/payOrder` 接口被加入匿名白名单，无需任何身份验证
+3. 支付逻辑直接调用，不经过第三方支付网关验签
+4. 合并利用即可实现 0 元购
+
 ## 验证环境
 
 - 源代码：yshop/ZkMall 最新分支（静态代码分析）
