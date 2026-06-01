@@ -34,6 +34,8 @@
 |------|------|----------|------|--------|
 | [V-S001](./V-S001_SonicCloudPlatform_Unauth_ExchangeSend/) | Sonic Cloud Platform v2.7.2 (sonic-server) | `/exchange/send` 未授权访问 — 任意 Agent 消息注入 | 9.1 | 严重 |
 | [V-S002](./V-S002_SonicCloudPlatform_Groovy_Unsandboxed_RCE/) | Sonic Cloud Platform v2.7.2 (sonic-agent) | Groovy 脚本无沙箱执行 → Agent 宿主机 RCE | 9.9 | 严重 |
+| [V-S003](./V-S003_SonicAgent_pullFile_CmdInjection_RCE/) | Sonic Cloud Platform v2.7.2 (sonic-agent) | `pullFile` WebSocket 消息 OS 命令注入 → 带回显 RCE | 9.9 | 严重 |
+| [V-S004](./V-S004_SonicAgent_startPerfmon_BlindRCE/) | Sonic Cloud Platform v2.7.2 (sonic-agent) | `startPerfmon` WebSocket 消息 OS 命令注入 → 盲注 RCE | 9.8 | 严重 |
 
 ## 报告结构
 
