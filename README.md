@@ -28,6 +28,13 @@
 | V-YU001 | yudao-cloud | BrokerageUser ORDER BY 注入 | 高 |
 | V-G001 | Guns Roses | 未授权文件预览路径穿越 | 严重 |
 
+### 新增（2026-06-01）
+
+| 编号 | 产品 | 漏洞类型 | CVSS | 严重度 |
+|------|------|----------|------|--------|
+| [V-S001](./V-S001_SonicCloudPlatform_Unauth_ExchangeSend/) | Sonic Cloud Platform v2.7.2 (sonic-server) | `/exchange/send` 未授权访问 — 任意 Agent 消息注入 | 9.1 | 严重 |
+| [V-S002](./V-S002_SonicCloudPlatform_Groovy_Unsandboxed_RCE/) | Sonic Cloud Platform v2.7.2 (sonic-agent) | Groovy 脚本无沙箱执行 → Agent 宿主机 RCE | 9.9 | 严重 |
+
 ## 报告结构
 
 每个漏洞位于独立目录 `V-XXX_项目名_漏洞描述/`：
